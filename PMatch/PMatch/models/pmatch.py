@@ -20,8 +20,8 @@ def local_correlation(
         # If flow is None, assume feature0 and feature1 are aligned
         coords = torch.meshgrid(
                 (
-                    torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device="cuda"),
-                    torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device="cuda"),
+                    torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=feature0.device),
+                    torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=feature0.device),
                 ))
         coords = torch.stack((coords[1], coords[0]), dim=-1)[
             None
@@ -31,8 +31,8 @@ def local_correlation(
     r = local_radius
     local_window = torch.meshgrid(
                 (
-                    torch.linspace(-2*local_radius/h, 2*local_radius/h, 2*r+1, device="cuda"),
-                    torch.linspace(-2*local_radius/w, 2*local_radius/w, 2*r+1, device="cuda"),
+                    torch.linspace(-2*local_radius/h, 2*local_radius/h, 2*r+1, device=feature0.device),
+                    torch.linspace(-2*local_radius/w, 2*local_radius/w, 2*r+1, device=feature0.device),
                 ))
     local_window = torch.stack((local_window[1], local_window[0]), dim=-1)[
             None
@@ -126,8 +126,8 @@ class ConvRefiner(nn.Module):
         if self.has_displacement_emb:
             query_coords = torch.meshgrid(
             (
-                torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device="cuda"),
-                torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device="cuda"),
+                torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=x.device),
+                torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=x.device),
             )
             )
             query_coords = torch.stack((query_coords[1], query_coords[0]))
@@ -536,7 +536,6 @@ class Decoder(nn.Module):
 
 def kde(x, std = 0.1):
     # use a gaussian kernel to estimate density
-    x = torch.from_numpy(x).cuda()
     scores = (-torch.cdist(x,x)**2/(2*std**2)).exp()
     density = scores.sum(dim=-1)
     return density
@@ -646,8 +645,8 @@ class PMatch(nn.Module):
         _, hs, ws, _ = query_to_support.shape
         query_coords = torch.meshgrid(
             (
-                torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device="cuda"),
-                torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device="cuda"),
+                torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=dense_certainty.device),
+                torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=dense_certainty.device),
             )
         )
         query_coords = torch.stack((query_coords[1], query_coords[0]))
