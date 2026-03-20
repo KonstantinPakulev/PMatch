@@ -7,12 +7,12 @@ from argparse import ArgumentParser
 # Third-party imports
 import numpy as np
 import torch
-from tabulate import tabulate
 from PIL import Image
 from tqdm import tqdm
 
 # Local imports
 from tools.evaluation import compute_pose_error, pose_auc, estimate_pose
+from tools.dataops import get_tuple_transform_ops
 from PMatch.PMatch.models import PMatch
 
 # Constants
@@ -86,16 +86,26 @@ class ScanNetBenchmark:
         return np.concatenate((R_est, t_est), axis=-1)
 
     @torch.no_grad()
-    def benchmark(self, model):
+    def benchmark(self, model, dump_dir=None, max_pairs=None, seed=0):
         """Run benchmark evaluation on the dataset."""
+        if dump_dir is not None:
+            os.makedirs(dump_dir, exist_ok=True)
+
         # Load test data
         test_data = np.load(os.path.join(self.data_root, "test.npz"))
         pairs, rel_pose = test_data["name"], test_data["rel_pose"]
         tot_e_t, tot_e_R, tot_e_pose = [], [], []
 
         # Set random seed for reproducibility
-        np.random.seed(0)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
         pair_indices = np.random.choice(len(pairs), size=len(pairs), replace=False)
+        if max_pairs is not None:
+            pair_indices = pair_indices[:max_pairs]
+
+        dump_idx = 0
         for pairind in tqdm(pair_indices):
             # Get scene information
             scene = pairs[pairind]
@@ -116,8 +126,24 @@ class ScanNetBenchmark:
             
             # Match features
             dense_matches, dense_certainty = model.match(im1, im2)
-            sparse_matches, _ = model.sample(dense_matches, dense_certainty, NUM_MATCHES)
-            
+            sparse_matches_t, _ = model.sample(dense_matches, dense_certainty, NUM_MATCHES)
+            sparse_matches = sparse_matches_t.cpu().numpy()
+
+            # Dump per-pair bundle for pipeline comparison
+            if dump_dir is not None:
+                test_transform = get_tuple_transform_ops(
+                    resize=(model.h_resized, model.w_resized), normalize=True
+                )
+                t1, t2 = test_transform((im1, im2))
+                torch.save({
+                    'image0':         t1,
+                    'image1':         t2,
+                    'im0_path':       str(im1_path),
+                    'im1_path':       str(im2_path),
+                    'sparse_matches': sparse_matches_t,
+                }, os.path.join(dump_dir, f'{dump_idx:05d}.pt'))
+                dump_idx += 1
+
             # Process keypoints
             kpts1 = self._process_keypoints(sparse_matches[:, :2], w1, h1)
             kpts2 = self._process_keypoints(sparse_matches[:, 2:], w2, h2)
@@ -208,21 +234,34 @@ def main():
         type=str,
         default="/home/ubuntu/disk5/TwoViewBenchmark/scannet_test_1500"
     )
+    parser.add_argument("--dump_dir", default=None,
+                        help="Save per-pair .pt bundles for pipeline comparison")
+    parser.add_argument("--max_pairs", type=int, default=None,
+                        help="Limit to N pairs (debug mode)")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for pair shuffling")
+    parser.add_argument("--output", default=None,
+                        help="Save results as JSON to this path")
     args, _ = parser.parse_known_args()
 
     # Set up model and run benchmark
     model = setup_model(args.checkpoints)
     benchmark = ScanNetBenchmark(args.data_path)
-    result = benchmark.benchmark(model)
-    
+    result = benchmark.benchmark(model,
+                                 dump_dir=args.dump_dir,
+                                 max_pairs=args.max_pairs,
+                                 seed=args.seed)
+
     # Display results
-    print(tabulate(
-        result.items(),
-        headers=['Metric', 'Scores'],
-        tablefmt='fancy_grid',
-        floatfmt=".2f",
-        numalign="left"
-    ))
+    for k, v in result.items():
+        print(f'  {k}: {v:.4f}')
+
+    if args.output is not None:
+        import json
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        with open(args.output, 'w') as f:
+            json.dump(result, f, indent=2)
+        print(f'\nSaved to {args.output}')
 
 if __name__ == "__main__":
     main()

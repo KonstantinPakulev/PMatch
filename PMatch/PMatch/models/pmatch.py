@@ -685,31 +685,22 @@ class PMatch(nn.Module):
         elif "naive" in self.sample_mode:
             dense_certainty = torch.ones_like(dense_certainty)
         matches, certainty = (
-            dense_matches.reshape(-1, 4).cpu().numpy(),
-            dense_certainty.reshape(-1).cpu().numpy(),
+            dense_matches.reshape(-1, 4),
+            dense_certainty.reshape(-1),
         )
         expansion_factor = 4 if "balanced" in self.sample_mode else 1
-        good_samples = np.random.choice(
-            np.arange(len(matches)),
-            size=min(expansion_factor*num, len(certainty)),
-            replace=False,
-            p=certainty / np.sum(certainty),
-        )
+        good_samples = torch.multinomial(certainty,
+                          num_samples=min(expansion_factor*num, len(certainty)),
+                          replacement=False)
         good_matches, good_certainty = matches[good_samples], certainty[good_samples]
         if "balanced" not in self.sample_mode:
             return good_matches, good_certainty
-        density = kde(good_matches, std=0.1).cpu().numpy()
+        density = kde(good_matches, std=0.1)
         p = 1 / (density+1)
         p[density < 10] = 1e-7 # Basically should have at least 10 perfect neighbours, or around 100 ok ones
-        p = p/np.sum(p)
         if samplesize is None:
             samplesize = num
-        else:
-            samplesize = samplesize
-        balanced_samples = np.random.choice(
-            np.arange(len(good_matches)),
-            size=min(samplesize,len(good_certainty)),
-            replace=False,
-            p = p,
-        )
+        balanced_samples = torch.multinomial(p,
+                          num_samples=min(samplesize, len(good_certainty)),
+                          replacement=False)
         return good_matches[balanced_samples], good_certainty[balanced_samples]
