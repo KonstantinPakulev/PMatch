@@ -7,7 +7,6 @@ from argparse import ArgumentParser
 # Third-party imports
 import numpy as np
 import torch
-from tabulate import tabulate
 from PIL import Image
 from tqdm import tqdm
 
@@ -21,6 +20,7 @@ NUM_MATCHES = 5000
 NUM_ITERATIONS = 5
 CONFIDENCE = 0.99999
 POSE_THRESHOLDS = [5, 10, 20]
+DEFAULT_ERROR = 90
 
 # Add project root to system path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))))
@@ -71,17 +71,29 @@ class Megadepth1500Benchmark:
         return np.concatenate((R_est, t_est), axis=-1)
 
     @torch.no_grad()
-    def benchmark(self, model):
+    def benchmark(self, model, max_pairs=None, dump_dir=None):
         """Run benchmark evaluation on the dataset."""
+        if dump_dir is not None:
+            import os as _os
+            _os.makedirs(dump_dir, exist_ok=True)
+        from tools.dataops import get_tuple_transform_ops
+        dump_transform = get_tuple_transform_ops(resize=(model.h_resized, model.w_resized), normalize=True)
         tot_e_t, tot_e_R, tot_e_pose = [], [], []
-        
+        dump_idx = 0
+        remaining = max_pairs
+
         for scene in self.scenes:
+            if remaining is not None and remaining <= 0:
+                break
             pairs = scene["pair_infos"]
             intrinsics = scene["intrinsics"]
             poses = scene["poses"]
             im_paths = scene["image_paths"]
-            
-            for pairind in tqdm(range(len(pairs)), disable=False):
+            n = min(len(pairs), remaining) if remaining is not None else len(pairs)
+            if remaining is not None:
+                remaining -= n
+
+            for pairind in tqdm(range(n), disable=False):
                 idx1, idx2 = pairs[pairind][0]
                 
                 # Get camera parameters
@@ -99,7 +111,20 @@ class Megadepth1500Benchmark:
 
                 # Match features
                 dense_matches, dense_certainty = model.match(im1, im2)
-                sparse_matches, _ = model.sample(dense_matches, dense_certainty, NUM_MATCHES)
+                sparse_matches_t, _ = model.sample(dense_matches, dense_certainty, NUM_MATCHES)
+                sparse_matches = sparse_matches_t.cpu().numpy()
+
+                if dump_dir is not None:
+                    import os as _os
+                    t1_dump, t2_dump = dump_transform((im1, im2))
+                    torch.save({
+                        'image0': t1_dump,
+                        'image1': t2_dump,
+                        'im0_path': str(im1_path),
+                        'im1_path': str(im2_path),
+                        'sparse_matches': sparse_matches_t.cpu(),
+                    }, _os.path.join(dump_dir, f'{dump_idx:05d}.pt'))
+                    dump_idx += 1
 
                 # Process keypoints
                 kpts1 = self._process_keypoints(sparse_matches[:, :2], w1, h1)
@@ -113,8 +138,14 @@ class Megadepth1500Benchmark:
                     kpts2_shuffled = kpts2[shuffling]
 
                     # Estimate pose and compute errors
-                    T1_to_2_est = self._estimate_relative_pose(kpts1_shuffled, kpts2_shuffled, K1, K2)
-                    e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
+                    try:
+                        T1_to_2_est = self._estimate_relative_pose(kpts1_shuffled, kpts2_shuffled, K1, K2)
+                        if T1_to_2_est is None:
+                            e_t = e_R = DEFAULT_ERROR
+                        else:
+                            e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
+                    except (TypeError, ValueError, np.linalg.LinAlgError):
+                        e_t = e_R = DEFAULT_ERROR
                     e_pose = max(e_t, e_R)
 
                     # Store errors
@@ -174,21 +205,25 @@ def main():
         type=str,
         default="/home/ubuntu/disk5/TwoViewBenchmark/megadepth_test_1500"
     )
+    parser.add_argument("--max_pairs", type=int, default=None,
+                        help="Limit to N pairs (debug mode)")
+    parser.add_argument("--dump_dir", default=None,
+                        help="Save per-pair .pt bundles here")
+    parser.add_argument("--seed", type=int, default=0)
     args, _ = parser.parse_known_args()
+
+    import torch as _torch
+    _torch.manual_seed(args.seed)
 
     # Set up model and run benchmark
     model = setup_model(args.checkpoints)
     benchmark = Megadepth1500Benchmark(args.data_path)
-    result = benchmark.benchmark(model)
+    result = benchmark.benchmark(model, max_pairs=args.max_pairs, dump_dir=args.dump_dir)
 
     # Display results
-    print(tabulate(
-        result.items(),
-        headers=['Metric', 'Scores'],
-        tablefmt='fancy_grid',
-        floatfmt=".2f",
-        numalign="left"
-    ))
+    print('\n=== PMatch outdoor — MegaDepth-1500 ===')
+    for k, v in result.items():
+        print(f'  {k}: {v:.4f}')
 
 if __name__ == "__main__":
     main()
